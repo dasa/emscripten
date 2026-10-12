@@ -2148,6 +2148,22 @@ addToLibrary({
     }
   },
 
+  // The `_callback` variant of an __async: 'auto' function on the main thread
+  // (see jsifier): once the body's value or Promise settles, callback(arg,
+  // value), or cancel(arg) if it rejected, never before the call returns. A
+  // pending callback holds the runtime alive like a timer.
+  $callbackFromPromise__deps: ['$callUserCallback'],
+  $callbackFromPromise: (result, callback, cancel, arg) => {
+    {{{ runtimeKeepalivePush() }}}
+    Promise.resolve(result).then((value) => {
+      {{{ runtimeKeepalivePop() }}}
+      callUserCallback(() => {{{ makeDynCall('vpp', 'callback') }}}(arg, value));
+    }, () => {
+      {{{ runtimeKeepalivePop() }}}
+      callUserCallback(() => cancel && {{{ makeDynCall('vp', 'cancel') }}}(arg));
+    });
+  },
+
   $maybeExit__deps: ['exit', '$handleException', '$keepRuntimeAlive',
 #if PTHREADS
     '_emscripten_thread_exit',

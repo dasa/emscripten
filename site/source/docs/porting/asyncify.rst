@@ -229,22 +229,33 @@ Async auto call variants
 ########################
 
 All ``__async: 'auto'`` defined library functions support a calling convention
-for being called with a ``_promise`` suffix to obtain the promise value directly
-without suspending, so it can be called from any stack.
+for being called with a ``_promise`` or ``_callback`` suffix to obtain the
+result as a promise or through a callback directly without suspending, which
+can be called from any stack.
 
 The same ``lookup`` definition from the example in the previous section above
-defines both C variants:
+defines all three C variants:
 
 .. code-block:: c
 
    intptr_t lookup(const char* name);
    em_promise_t lookup_promise(const char* name);
+   void lookup_callback(const char* name,
+                        void (*callback)(void* arg, void* result),
+                        void (*cancel)(void* arg), void* arg);
 
 Calling ``lookup_promise()`` runs the same body (with ``sync`` always
 ``false``) and returns a promise handle (``em_promise_t``, see
 ``<emscripten/promise.h>``) on the calling thread, fulfilled with the result or
-rejected with ``NULL``.  These
-variants are only generated when explicitly used.
+rejected with ``NULL``.
+
+Calling ``lookup_callback()`` likewise runs the body and calls
+``callback(arg, result)`` on the calling thread once the result is available,
+or ``cancel(arg)`` (which may be ``NULL``) if the promise was rejected, in
+either case after the call has returned.  A pending callback keeps the runtime
+alive, like a timer.
+
+These variants are only generated when explicitly used.
 
 Ways to use Asyncify APIs in older engines
 ##########################################

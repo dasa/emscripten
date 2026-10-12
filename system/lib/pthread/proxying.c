@@ -6,6 +6,7 @@
  */
 
 #include <assert.h>
+#include <emscripten/eventloop.h>
 #include <emscripten/proxying.h>
 #include <emscripten/threading.h>
 #include <pthread.h>
@@ -732,6 +733,20 @@ static em_promise_result_t js_promise_settle(void** result, void* data, void* va
   return rtn;
 }
 
+// A heap copy of a call's arguments, outliving the call.
+static proxied_js_func_t
+js_func_copy(int func_index, void* em_asm_addr, int buf_size, double* buffer) {
+  proxied_js_func_t f = {
+    .funcIndex = func_index,
+    .emAsmAddr = em_asm_addr,
+    .callingThread = pthread_self(),
+    .bufSize = buf_size,
+    .argBuffer = malloc(buf_size),
+  };
+  memcpy(f.argBuffer, buffer, buf_size);
+  return f;
+}
+
 // Returns immediately on the calling thread with an em_promise_t; async on the
 // main thread, whose result settles it once the calling thread runs its queue
 // (emscripten_proxy_promise_with_ctx). Rejected with NULL if the function's
@@ -741,14 +756,7 @@ em_promise_t _emscripten_run_js_on_main_thread_promise(int func_index,
                                                        int buf_size,
                                                        double* buffer) {
   proxied_js_func_t* arg = malloc(sizeof(proxied_js_func_t));
-  *arg = (proxied_js_func_t){
-    .funcIndex = func_index,
-    .emAsmAddr = em_asm_addr,
-    .callingThread = pthread_self(),
-    .bufSize = buf_size,
-    .argBuffer = malloc(buf_size),
-  };
-  memcpy(arg->argBuffer, buffer, buf_size);
+  *arg = js_func_copy(func_index, em_asm_addr, buf_size, buffer);
   em_promise_t done = emscripten_proxy_promise_with_ctx(
     emscripten_proxy_get_system_queue(),
     emscripten_main_runtime_thread_id(),
@@ -758,4 +766,65 @@ em_promise_t _emscripten_run_js_on_main_thread_promise(int func_index,
     emscripten_promise_then(done, js_promise_settle, js_promise_settle, arg);
   emscripten_promise_destroy(done);
   return promise;
+}
+
+typedef struct proxied_js_callback_t {
+  // First, as the arg of run_js_func_with_ctx.
+  proxied_js_func_t func;
+  void (*callback)(void* arg, void* result);
+  void (*cancel)(void* arg);
+  void* arg;
+} proxied_js_callback_t;
+
+static void js_callback_free(proxied_js_callback_t* c) {
+  free(c->func.argBuffer);
+  free(c);
+  emscripten_runtime_keepalive_pop();
+}
+
+static void js_callback_call(void* data) {
+  proxied_js_callback_t* c = data;
+  if (c->func.fulfilled) {
+    c->callback(c->arg, (void*)(intptr_t)c->func.result);
+  } else if (c->cancel) {
+    c->cancel(c->arg);
+  }
+  js_callback_free(c);
+}
+
+static void js_callback_cancel(void* data) {
+  proxied_js_callback_t* c = data;
+  if (c->cancel) {
+    c->cancel(c->arg);
+  }
+  js_callback_free(c);
+}
+
+// Calls `callback(arg, result)` on the calling thread with the main-thread
+// result once it runs its queue (emscripten_proxy_callback_with_ctx), or
+// `cancel(arg)` if the function's Promise rejected or the main thread exited.
+// The pending callback holds this thread's runtime alive like a timer.
+void _emscripten_run_js_on_main_thread_callback(int func_index,
+                                                void* em_asm_addr,
+                                                int buf_size,
+                                                double* buffer,
+                                                void (*callback)(void*, void*),
+                                                void (*cancel)(void*),
+                                                void* arg) {
+  emscripten_runtime_keepalive_push();
+  proxied_js_callback_t* c = malloc(sizeof(*c));
+  *c = (proxied_js_callback_t){
+    .func = js_func_copy(func_index, em_asm_addr, buf_size, buffer),
+    .callback = callback,
+    .cancel = cancel,
+    .arg = arg,
+  };
+  if (!emscripten_proxy_callback_with_ctx(emscripten_proxy_get_system_queue(),
+                                          emscripten_main_runtime_thread_id(),
+                                          run_js_func_with_ctx,
+                                          js_callback_call,
+                                          js_callback_cancel,
+                                          c)) {
+    js_callback_cancel(c);
+  }
 }
